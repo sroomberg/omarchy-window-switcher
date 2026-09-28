@@ -1,7 +1,10 @@
 #!/bin/bash
-# Bound to Alt's own key-release. Ends the current Alt+Tab session: clears
-# the snapshotted window order (so the next Tab press takes a fresh one) and
-# tells the HUD overlay to hide.
+# Manual "reset now" utility — not bound to anything by default. Session
+# expiry is purely time-based (see hypr-cycle-window.sh), so this isn't
+# needed for normal use, but running it once at login clears any state left
+# over from a crash/reboot immediately instead of waiting out the timeout.
+# Clears the snapshotted window order (so the next Tab press takes a fresh
+# one) and tells the HUD overlay to hide right away.
 set -euo pipefail
 
 state_dir="$HOME/.local/state/omarchy/window-switcher"

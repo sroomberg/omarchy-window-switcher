@@ -50,16 +50,18 @@ Item {
     onLoadFailed: root.visiblePanel = false
   }
 
-  // The HUD is meant to hide the instant Alt is released (see
-  // hypr-cycle-window-end.sh, bound to Alt_L/Alt_R release). That binding
-  // can miss its moment — e.g. a Hyprland config reload while Alt is held
-  // resets the compositor's press-tracking, so the release event that
-  // should fire the unbind script never comes — which would otherwise leave
-  // this HUD stuck on screen indefinitely. This timer is the backstop: if
-  // no Tab press refreshes the state file for a bit, hide regardless.
+  // There's no reliable way to detect Alt being released on this Hyprland
+  // build — binding `{ release = true }` on a bare modifier key registers
+  // without error but never actually fires on physical hardware (confirmed
+  // by live-testing with logging on both the bind and Hyprland's own IPC
+  // event socket: zero release events across multiple bare Alt taps and
+  // full Alt+Tab cycles). So hiding is purely time-based: if no Tab press
+  // refreshes the state file within this window, hide. Keep this in sync
+  // with session_timeout_s in hypr-cycle-window.sh, which uses the same
+  // window to decide whether to start a fresh session.
   Timer {
     id: watchdog
-    interval: 2500
+    interval: 3000
     onTriggered: root.visiblePanel = false
   }
 
