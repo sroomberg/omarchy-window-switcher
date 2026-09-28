@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "sroomberg.window-switcher",
+  "name": "Window Switcher",
+  "version": "1.0.0",
+  "author": "sroomberg",
+  "description": "macOS Cmd+Tab-style HUD, driven by hypr-cycle-window.sh's state file",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "WindowSwitcher.qml"
+  }
+}
