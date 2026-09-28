@@ -2,16 +2,19 @@
 # Alt+Tab replacement for Hyprland/Omarchy: cycles windows across ALL
 # workspaces (stock Alt+Tab only cycles within the current one), follows to
 # whichever workspace the target window lives on, and drives a macOS-style
-# HUD overlay (see ../plugins/window-switcher) that shows the app list and
+# HUD overlay (see ../WindowSwitcher.qml) that shows the app list and
 # highlights the current selection while Alt is held.
 #
 # Usage: hypr-cycle-window.sh [next|prev]
 #
-# The window order is snapshotted once per "session" (the stretch between
-# the first Tab press and Alt being released — see hypr-cycle-window-end.sh)
-# so repeated Tab presses walk a stable list instead of re-sorting by
-# most-recently-used on every press, which would just bounce between the
-# two most recent windows.
+# The window order (and each app's resolved icon/title) is computed once per
+# "session" (the stretch between the first Tab press and Alt being
+# released — see hypr-cycle-window-end.sh) and cached in session.json.
+# Repeated Tab presses within that session only update which entry is
+# selected — they don't re-walk the window list or re-resolve icons, both of
+# which are the slow part (multiple filesystem scans per app). Without this,
+# every single press pays that cost again, which is why the HUD used to
+# visibly lag behind the (fast) actual window switch.
 set -euo pipefail
 
 direction="${1:-next}"
@@ -35,32 +38,38 @@ resolve_icon() {
 }
 
 clients_json="$(hyprctl clients -j)"
-current_address="$(hyprctl activewindow -j 2>/dev/null | jq -r '.address // empty')"
 
 session_valid=false
 if [[ -f "$session_file" ]]; then
-  addresses_json="$(jq -c '.addresses' "$session_file" 2>/dev/null || echo '[]')"
+  apps_json="$(jq -c '.apps' "$session_file" 2>/dev/null || echo '[]')"
   index="$(jq -r '.index' "$session_file" 2>/dev/null || echo 0)"
-  # A leftover session file (crash, missed release event, or — since this is
-  # a plain file in ~/.local/state — simply surviving a reboot) can reference
-  # windows that no longer exist. Trust it only if every address it lists is
-  # still an actual open window right now; otherwise treat it as absent and
-  # take a fresh snapshot.
-  if [[ -n "$addresses_json" && "$addresses_json" != "null" ]]; then
-    stale_count="$(echo "$clients_json" | jq --argjson addrs "$addresses_json" '
-      [$addrs[] as $a | select(([.[]|.address] | index($a)) == null)] | length
+  if [[ -n "$apps_json" && "$apps_json" != "null" ]]; then
+    # A leftover session (crash, missed release event, or — since this is a
+    # plain file in ~/.local/state — simply surviving a reboot) can
+    # reference windows that no longer exist. Trust it only if every address
+    # it lists is still an actual open window right now.
+    stale_count="$(echo "$clients_json" | jq --argjson apps "$apps_json" '
+      [$apps[] as $a | select(([.[]|.address] | index($a.address)) == null)] | length
     ' 2>/dev/null || echo 1)"
     [[ "$stale_count" == "0" ]] && session_valid=true
   fi
 fi
 
 if [[ "$session_valid" != "true" ]]; then
-  addresses_json="$(echo "$clients_json" | jq -c 'sort_by(.focusHistoryID) | [.[].address]')"
+  # New session: snapshot the window order (Hyprland's own focusHistoryID,
+  # 0 = current focus) and resolve each app's icon/title once, up front.
+  mapfile -t new_addresses < <(echo "$clients_json" | jq -r 'sort_by(.focusHistoryID) | .[].address')
+  apps_json="[]"
+  for addr in "${new_addresses[@]}"; do
+    class="$(echo "$clients_json" | jq -r --arg addr "$addr" '.[] | select(.address == $addr) | .class')"
+    title="$(echo "$clients_json" | jq -r --arg addr "$addr" '.[] | select(.address == $addr) | .title')"
+    icon="$(resolve_icon "$class")"
+    apps_json="$(echo "$apps_json" | jq -c --arg class "$class" --arg title "$title" --arg icon "$icon" --arg addr "$addr" '. + [{class: $class, title: $title, icon: $icon, address: $addr}]')"
+  done
   index=0
 fi
 
-mapfile -t addresses < <(echo "$addresses_json" | jq -r '.[]')
-count=${#addresses[@]}
+count="$(echo "$apps_json" | jq 'length')"
 if (( count < 2 )); then
   exit 0
 fi
@@ -71,9 +80,16 @@ else
   index=$(( (index + 1) % count ))
 fi
 
-target_address="${addresses[$index]}"
+target_address="$(echo "$apps_json" | jq -r ".[$index].address")"
 target_workspace="$(echo "$clients_json" | jq -r --arg addr "$target_address" '.[] | select(.address == $addr) | .workspace.id')"
 current_workspace="$(hyprctl activeworkspace -j 2>/dev/null | jq -r '.id')"
+
+# Persist + tell the HUD immediately — before touching focus at all. All the
+# heavy lifting (icons, class/title) is already cached in $apps_json from
+# session setup, so this is just two fast file writes, and the HUD updates
+# in parallel with the switch below rather than only after it finishes.
+echo "{\"apps\": $apps_json, \"index\": $index}" > "$session_file"
+echo "{\"visible\": true, \"selected\": $index, \"apps\": $apps_json}" > "$hud_file"
 
 if [[ "$target_workspace" != "$current_workspace" ]]; then
   hyprctl dispatch "hl.dsp.focus({ workspace = \"$target_workspace\" })" >/dev/null
@@ -92,16 +108,3 @@ for _ in $(seq 1 8); do
   sleep 0.03
 done
 hyprctl dispatch 'hl.dsp.window.bring_to_top()' >/dev/null 2>&1 || true
-
-echo "{\"addresses\": $addresses_json, \"index\": $index}" > "$session_file"
-
-# Resolve an icon per app (bash loop — simplest way to reuse resolve_icon()).
-apps_with_icons="[]"
-while IFS= read -r addr; do
-  class="$(echo "$clients_json" | jq -r --arg addr "$addr" '.[] | select(.address == $addr) | .class')"
-  title="$(echo "$clients_json" | jq -r --arg addr "$addr" '.[] | select(.address == $addr) | .title')"
-  icon="$(resolve_icon "$class")"
-  apps_with_icons="$(echo "$apps_with_icons" | jq -c --arg class "$class" --arg title "$title" --arg icon "$icon" --arg addr "$addr" '. + [{class: $class, title: $title, icon: $icon, address: $addr}]')"
-done < <(echo "$addresses_json" | jq -r '.[]')
-
-echo "{\"visible\": true, \"selected\": $index, \"apps\": $apps_with_icons}" > "$hud_file"
